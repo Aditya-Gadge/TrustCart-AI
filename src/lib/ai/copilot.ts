@@ -252,7 +252,15 @@ export async function* runCopilot(options: CopilotRunOptions): AsyncGenerator<Co
       contents.push({
         role: "model",
         parts: calls.map((call) => ({
-          functionCall: { name: call.name, args: call.args, id: call.id },
+          functionCall: {
+            name: call.name,
+            args: call.args,
+            id: call.id,
+          },
+          // Gemini 3: the signature must sit at the PART level (sibling of
+          // functionCall), exactly as the API returned it — otherwise the
+          // next round is rejected with 400 INVALID_ARGUMENT.
+          thoughtSignature: call.thoughtSignature,
         })),
       });
 
@@ -315,7 +323,12 @@ export async function* runCopilot(options: CopilotRunOptions): AsyncGenerator<Co
         };
         return;
       }
-      contents.push({ role: "model", parts: [{ text: response.text }] });
+      contents.push({
+        role: "model",
+        // Echo the part-level thought signature on the replayed text turn
+        // (Gemini 3 requirement, same as functionCall parts).
+        parts: [{ text: response.text, thoughtSignature: response.textThoughtSignature }],
+      });
       contents.push({
         role: "user",
         parts: [

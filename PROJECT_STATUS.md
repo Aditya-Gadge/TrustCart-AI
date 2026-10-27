@@ -59,13 +59,20 @@ was verified: every value in `.env.example` is now a non-secret placeholder.
 
 | Command | Exit code | Result |
 |---|---|---|
-| `npm run lint` | 0 | clean |
-| `npm run typecheck` | 0 | clean |
-| `npm run test` (Vitest run) | 0 | **170/170 tests pass, 21/21 files** |
+| `npm run lint` | 0 | clean (re-verified 2026-10-27 remediation) |
+| `npm run typecheck` | 0 | clean (re-verified 2026-10-27 remediation) |
+| `npm run test` (Vitest run) | 0 | **187/187 tests pass, 22/22 files** (+17 `gemini-backoff.spec.ts`) |
 | `npm run build` (`next build`) | 0 | all routes compiled, incl. 3 payment routes |
 | `npm start` + `GET /api/health` | 200 | `{"status":"ok","database":"connected"}` (live smoke, Phase 7) |
 | `npm run test:e2e` (Playwright) | 0 | **13 passed, 1 skipped** — the REAL Sandbox test skips by design without buyer credentials |
 | `npm start` + `curl` live smoke | — | see "Live verification" below |
+| REAL: `GET /v1beta/models` (Gemini key check) | 200 | 58 models visible — key valid (2026-10-27) |
+| REAL: `gemini-3.8-flash:generateContent` | 503 | provider `UNAVAILABLE` "high demand" (2/2) — capacity, not config |
+| REAL: `gemini-3.5-flash:generateContent` | 200 | real completion ("pong") → `.env` model override |
+| REAL: round-2 WITH part-level `thoughtSignature` | 200 | proves the signature-echo fix against the live API |
+| REAL: round-2 WITHOUT the signature (old shape) | 400 | `INVALID_ARGUMENT missing thought_signature` — the app bug, now fixed |
+| REAL: PayPal OAuth2 client-credentials | 200 | token issued (~9h), value never printed (2026-10-27) |
+| REAL: PayPal `createOrder` (never captured) | 201 | `CREATED`, order `80U90787…` — egress resolved |
 
 No test was weakened or hidden to achieve these results. The single E2E skip
 is the REAL-provider checkout test's documented, by-design skip when sandbox
@@ -205,7 +212,7 @@ the latest verification results follow the inventory.
    currency-specific symbols and regression assertions, including a safe
    ISO-code fallback for unsupported currencies.
 
-## Test inventory — all PASS (170/170)
+## Test inventory - all PASS (187/187, 22 files)
 
 All provider behaviour in automated tests is **mocked**; the database in
 integration tests is the **real PostgreSQL** instance. No automated test
@@ -331,6 +338,18 @@ contacts Gemini or PayPal.
 - classifies a numeric status field
 - ignores fields other than name/message/status
 - still classifies Error instances by name and message
+
+`tests/unit/gemini-backoff.spec.ts` (17) — PASS (2026-10-27 remediation suite)
+- classifies transient provider failures (503/UNAVAILABLE/overloaded/network/
+  timeout/500) as retryable, with bounded-field inspection
+- never classifies quota (429/quota/resource_exhausted) or auth
+  (401/403/permission_denied/api key) failures as retryable
+- `withBoundedBackoff`: retries a transient failure and succeeds on attempt 2
+  (exactly one 500ms backoff), backs off exponentially 500ms→1000ms across
+  three attempts, gives up after maxAttempts rethrowing the last error,
+  performs exactly one attempt for quota/auth/non-transient errors, and
+  honours custom `maxAttempts`/`baseDelayMs`/`shouldRetry` (all with injected
+  sleep — no clock, no network)
 
 `tests/unit/demo-data.spec.ts` (2) — PASS (Phase 6 regression suite)
 - maps every DEMO_ORDERS riskBand with the engine's levelForScore
@@ -472,38 +491,68 @@ tests stub the PayPal SDK at the browser level by design).
   `copilot_unconfigured`; payment create → 503 `payments_unconfigured`; rate
   limit 429 verified. No secret value ever appeared in any response.
 
-### Real Gemini verification: PARTIAL — full run BLOCKED (provider capacity)
-- The configured real provider **is used**: with `GEMINI_API_KEY` set, chat
-  requests reach the Gemini API; the server log shows the SDK received a
-  `functionCall` response (the tool-use loop started) — twice.
-- A direct multi-turn diagnostic reproduced the orchestration with the real
-  API: the call fails with `ApiError 503 UNAVAILABLE — "This model is
-  currently experiencing high demand"` (3 distinct attempts, including one
-  that stalled >180s). The app classifies this correctly and key-free as
-  `provider_unavailable` with a retry message — exactly the designed
-  behaviour for provider outages (Phase 4 item 5).
-- A complete real-Gemini grounded answer could not be produced during this
-  session purely because the free-tier model is overloaded. **BLOCKED**, not
-  failed — the request/response path itself is verified up to the provider's
-  503.
+### Real Gemini verification: PARTIAL — full in-app run BLOCKED (provider capacity + free-tier quota)
 
-### Real PayPal Sandbox verification: BLOCKED (network egress degraded)
-- Credentials are configured and validated server-side (the config parser
-  accepted them; the payment create route attempted the real provider call).
-- The machine's connection to `api-m.sandbox.paypal.com` is severely
-  degraded: plain GETs succeed only intermittently (1 of 3, ~3–7s vs 0.2s to
-  Google), and Node's undici connect consistently timed out (10s connect
-  limit). 6 create attempts all failed at connect with a network error —
-  the app handled each one correctly: reservation kept retryable, honest
-  `PAYMENT_CREATE_TIMEOUT` audit, 503 with a retry-safe message.
-- The idempotent-reservation design was verified **against the real provider
-  path**: all 6 attempts returned the same single payment row — no duplicate
-  PayPal orders or business records.
+Remediation session (2026-10-27, real sanitized provider probes):
+
+- **Key valid**: `GET /v1beta/models` → HTTP 200 (58 models visible).
+- **503 is genuine provider capacity**: `gemini-3.8-flash` → HTTP 503
+  `UNAVAILABLE` "This model is currently experiencing high demand" (2/2),
+  and later bursts of 503 also hit `gemini-3.5-flash`.
+- **Working model exists**: `gemini-3.5-flash` → HTTP 200 with a real
+  completion ("pong"); `GEMINI_MODEL="gemini-3.5-flash"` set in `.env`
+  (gitignored) — the code default is unchanged.
+- **App-level round-2 bug found and fixed (root cause)**: Gemini 3 returns a
+  part-level `thoughtSignature` on functionCall parts. Real probe evidence:
+  echoing it at the PART level → HTTP 200; omitting it (the old transport
+  mapping dropped it) → HTTP 400 `INVALID_ARGUMENT "Function call is missing
+  a thought_signature in functionCall parts"`. Fix: the transport maps
+  `part.thoughtSignature` into `ModelFunctionCall`, and the copilot
+  orchestrator echoes it as a sibling of `functionCall` (and echoes
+  `textThoughtSignature` on replayed text turns).
+- **Bounded backoff added**: `withBoundedBackoff` in `src/lib/ai/gemini.ts` —
+  max 3 attempts, 500ms→1000ms, transient-only (network/timeout/5xx/UNAVAILABLE
+  — never 429/401/403), ~65s wall-clock budget, sanitized `[ai/gemini]`
+  attempt-failure logging. Verified in production logs: 503 bursts produced
+  exactly 3 attempts then the honest `provider_unavailable` classification;
+  a 429 produced exactly 1 attempt (quota never retried) and surfaced the
+  honest `quota_exhausted` state. 17 new deterministic unit tests
+  (`tests/unit/gemini-backoff.spec.ts`) cover all of this with mocked sleep.
+- **Full multi-round in-app completion: BLOCKED, not failed** — during this
+  session the free tier alternated between 503 "high demand" bursts and 429
+  quota exhaustion; the request/response path is verified up to the provider's
+  errors, the round-2 request shape is verified against the real API (200 with
+  the signature echo), but a complete grounded answer with citations could not
+  be produced within the provider's free-tier availability. No test was
+  weakened; nothing is claimed as live-verified beyond the probes listed.
+
+### Real PayPal Sandbox verification: PASS (egress resolved) — buyer checkout still not performed
+
+The previously reported "network egress degraded" finding is **stale** —
+re-probing with sanitized diagnostics (2026-10-27) shows a healthy path:
+
+- DNS resolves (Cloudflare edge 104.17.x.x), TLS connects in 35–800ms; the
+  earlier "1 of 3 GETs" behaviour no longer reproduces (5/5 HTTP responses
+  from the edge — a 403 on `/` is PayPal's edge answering, not a network
+  failure).
+- **Authenticated OAuth2 client-credentials: HTTP 200**, real token issued
+  (~9h expiry; token value never printed or logged).
+- **Orders API `createOrder`: HTTP 201 `CREATED`** (order id prefix
+  `80U90787…`), sent with a `PayPal-Request-Id`, explicitly **never captured**
+  — no money moved, the diagnostic order expires unused.
+- Env var names verified to match the code exactly
+  (`PAYPAL_CLIENT_ID`/`PAYPAL_CLIENT_SECRET`/`PAYPAL_BASE_URL`);
+  error classification already distinguishes network / timeout / HTTP / auth.
+- No PayPal code changes were needed: server-side verification, idempotent
+  replay (same deterministic `PayPal-Request-Id`), and safe payment states
+  were already in place (Phases 5–6).
 - A real buyer checkout (approval + capture) was **not** performed: it
-  requires the human buyer steps and an egress path that currently does not
-  connect reliably. No real payment was made and none is claimed. The new
-  **(REAL)** Playwright test encodes the buyer procedure and skips until
-  `PAYPAL_BUYER_EMAIL` / `PAYPAL_BUYER_PASSWORD` are provided; it has not run.
+  requires `PAYPAL_BUYER_EMAIL` / `PAYPAL_BUYER_PASSWORD`, which are unset —
+  the **(REAL)** Playwright test encodes the buyer procedure and skips by
+  design until they are provided. No real payment was made and none is claimed.
+- **Credential rotation note**: during `.env` repair the PayPal Sandbox
+  client secret was accidentally printed into an agent transcript (see
+  "Required: rotate provider credentials" above) — rotation is required.
 
 ## Security review (Phases 4–5 boundaries preserved)
 
@@ -537,12 +586,20 @@ tests stub the PayPal SDK at the browser level by design).
 1. Real Gemini full-run and real Sandbox buyer checkout are BLOCKED as
    described above — environmental, not code defects. When egress/provider
    capacity is available, re-run the live smoke and (for PayPal) the **(REAL)**
-   Playwright test with buyer credentials set.
+   Playwright test with buyer credentials set. (2026-10-27 update: PayPal
+   egress is resolved and verified up to an uncaptured 201 create; the
+   remaining PayPal gap is only the buyer-approval step. The Gemini gap is
+   free-tier capacity/quota availability — the round-2 signature fix is
+   verified against the live API.)
 2. The stale payment reservation on TC-3378 (from the egress-blocked real
    create attempts) remains in the demo data as an honest CREATED row; with
    the retry fix it will complete on the next successful create attempt.
 3. Gemini model id `gemini-3.8-flash` is pinned by default; override with
-   `GEMINI_MODEL`.
+   `GEMINI_MODEL` (the local `.env` sets `gemini-3.5-flash` after real-probe
+   evidence; `gemini-3.8-flash` returned sustained 503 "high demand").
+   Gemini 3 models additionally require echoing part-level
+   `thoughtSignature` values on follow-up rounds — handled by the transport
+   and orchestrator since the 2026-10-27 remediation.
 4. **Release blocker:** demo authorization model is single synthetic merchant
    with no auth layer (D-002). Do not expose this application publicly until a
    real server-side merchant identity/session model protects sensitive reads

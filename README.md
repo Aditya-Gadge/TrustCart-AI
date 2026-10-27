@@ -105,7 +105,7 @@ and provider placeholders, not production credentials.
 |---|---|---|
 | `DATABASE_URL` | For live DB-backed features | PostgreSQL URL. For serverless hosting, use the provider's pooled connection string and keep a separate database/branch for Preview. |
 | `GEMINI_API_KEY` | Optional | Server-only Google AI Studio API key. Without it, Copilot returns an unconfigured state and the UI offers stored-data fallback. |
-| `GEMINI_MODEL` | Optional | Gemini model ID available to your project. Defaults to `gemini-3.8-flash`; confirm current model availability and quota in AI Studio before relying on it. |
+| `GEMINI_MODEL` | Optional | Gemini model ID available to your project. Defaults to `gemini-3.8-flash`; confirm current model availability and quota in AI Studio before relying on it. Free-tier 503 "high demand" bursts are model capacity, not a configuration error — point `GEMINI_MODEL` at an alternate model (e.g. `gemini-3.5-flash`) if one is overloaded. Transient provider failures are retried automatically with bounded exponential backoff (3 attempts, never for quota or auth errors). |
 | `PAYPAL_CLIENT_ID` | Optional | PayPal Sandbox app client ID. This is passed to the PayPal browser SDK and is not a secret. |
 | `PAYPAL_CLIENT_SECRET` | Optional | PayPal Sandbox app secret; server-side only. |
 | `PAYPAL_BASE_URL` | Optional | Must be `https://api-m.sandbox.paypal.com`; the app rejects non-Sandbox hosts. |
