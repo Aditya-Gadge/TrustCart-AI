@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      // Read-only documentation lookup for official library/API docs
+      // (AGENTS.md: "Use official documentation and Context7 MCP when available").
+      // No secrets stored here; OAuth handles authentication automatically.
+      "context7": {
+        "type": "remote",
+        "url": "https://mcp.context7.com/mcp",
+      },
+      // Override stub: disables the `rea` server configured outside this
+      // project for THIS project only (it was failing with a connection
+      // timeout). V2 replaces the same-named server object entirely, so the
+      // original definition stays valid elsewhere. Delete this entry with its
+      // trailing comment to restore `rea`.
+      "rea": {
+        "type": "local",
+        "command": ["cmd", "/c", "echo", "rea-disabled-for-this-project"],
+        "disabled": true,
+      },
+    },
+  },
+}

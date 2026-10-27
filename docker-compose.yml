@@ -1,0 +1,24 @@
+# TrustCart AI — local development PostgreSQL.
+# These credentials are LOCAL-ONLY throwaway values for development use
+# (they are not real provider credentials and are never committed to a
+# remote deployment). Do not reuse them in any shared or hosted system.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trustcart
+      POSTGRES_PASSWORD: trustcart_local_dev_only
+      POSTGRES_DB: trustcart
+    ports:
+      - "54329:5432"
+    volumes:
+      - trustcart_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustcart -d trustcart"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  trustcart_pgdata:

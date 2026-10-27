@@ -1,0 +1,160 @@
+// TrustCart AI — Phase 2 data model
+//
+// Adapted from the approved architecture (docs/architecture.md) — this
+// schema keeps the five task-specified models and adds only the columns
+// the Phase 1 UI and Phase 3 review workflow demonstrably need
+// (synthetic customer display fields). Every money column is an integer
+// count of minor currency units with a sibling ISO-4217 currency code.
+//
+// SECURITY NOTES
+// - No card numbers, PAN data, or CVV are ever stored (PayPal wallet flow).
+// - Order.riskAssessment is the current deterministic assessment snapshot.
+// - EvalLabel is EVALUATION-ONLY: risk-scoring logic must never read it.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum OrderStatus {
+  PENDING
+  APPROVED
+  HELD_FOR_REVIEW
+}
+
+enum ReviewDecision {
+  APPROVED
+  HELD_FOR_REVIEW
+  PENDING // reset-to-pending decisions (Phase 3 review workflow)
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum PaymentStatus {
+  CREATED
+  PAYER_APPROVED
+  CAPTURED
+  VERIFIED
+  FAILED
+  EXPIRED
+}
+
+enum AuditEntityType {
+  ORDER
+  REVIEW
+  PAYMENT
+  SYSTEM
+}
+
+enum EvaluationLabel {
+  ORDINARY
+  HIGH_VALUE
+  REPEATED
+  SUSPICIOUS
+}
+
+model Order {
+  id            String      @id @default(cuid())
+  orderNumber   String      @unique @db.VarChar(24)
+  amount        Int // minor units (e.g. cents)
+  currency      String      @db.VarChar(3) // ISO-4217, validated at app layer
+  itemCount     Int
+  // Synthetic merchant-facing fields for the demo dataset (no real PII).
+  customerName  String      @db.VarChar(120)
+  customerEmail String      @db.VarChar(160)
+  shippingCountry String    @db.VarChar(64)
+  // Deterministic risk-engine input features.
+  accountAgeDays    Int
+  recentOrderCount  Int
+  shippingMismatch  Boolean
+  // Current workflow state (Reviews below hold the decision history).
+  orderStatus   OrderStatus @default(PENDING)
+  createdAt     DateTime
+  updatedAt     DateTime    @updatedAt
+
+  riskAssessment RiskAssessment?
+  reviews        Review[]
+  payments       Payment[]
+  evalLabel      EvalLabel?
+  // Audit trail deliberately unrelated: AuditEvent is a polymorphic log
+  // keyed by (entityType, entityId), not a foreign-key relation.
+
+  @@index([createdAt])
+  @@index([orderStatus])
+}
+
+model RiskAssessment {
+  id           String    @id @default(cuid())
+  orderId      String    @unique
+  score        Int // 0–100
+  level        RiskLevel
+  reasons      Json // [{ code, label, points, explanation }]
+  rulesVersion String    @db.VarChar(32)
+  createdAt    DateTime  @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([level])
+}
+
+model Review {
+  id         String         @id @default(cuid())
+  orderId    String
+  reviewerId String         @db.VarChar(64) // demo actor label
+  decision   ReviewDecision
+  note       String?        @db.VarChar(280)
+  createdAt  DateTime       @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+}
+
+// Payment rows are ONLY ever written by real server-side PayPal flows
+// (Phase 5). The seed never fabricates payment records.
+model Payment {
+  id               String        @id @default(cuid())
+  orderId          String
+  provider         String        @default("paypal") @db.VarChar(20)
+  providerOrderId  String?       @unique @db.VarChar(64)
+  providerCaptureId String?      @unique @db.VarChar(64)
+  status           PaymentStatus
+  amount           Int // minor units
+  currency         String        @db.VarChar(3)
+  verifiedAt       DateTime? // set only after server-side verification
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+}
+
+model AuditEvent {
+  id         String         @id @default(cuid())
+  entityType AuditEntityType
+  entityId   String         @db.VarChar(64) // subject row id
+  action     String         @db.VarChar(64)
+  actor      String         @db.VarChar(64)
+  metadata   Json // safe, non-secret details only
+  createdAt  DateTime       @default(now())
+
+  @@index([entityType, entityId, createdAt])
+}
+
+// ── EVALUATION-ONLY (never read by risk-scoring code) ──
+model EvalLabel {
+  orderId    String          @unique
+  label      EvaluationLabel
+  createdAt  DateTime        @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
