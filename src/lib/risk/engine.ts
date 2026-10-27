@@ -70,12 +70,15 @@ function isUsableInt(value: number | null | undefined): value is number {
 
 /** Deterministic minor-unit money formatting (no Intl — stable across hosts). */
 export function formatMinorForEvidence(minor: number, currency: string): string {
+  const symbol = { USD: "$", EUR: "€", GBP: "£" }[currency];
   const sign = minor < 0 ? "-" : "";
   const abs = Math.abs(minor);
   const whole = Math.floor(abs / 100).toString();
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   const cents = (abs % 100).toString().padStart(2, "0");
-  return `${sign}$${grouped}.${cents} ${currency}`;
+  return symbol
+    ? `${sign}${symbol}${grouped}.${cents} ${currency}`
+    : `${sign}${grouped}.${cents} ${currency}`;
 }
 
 function pad2(value: number): string {

@@ -74,6 +74,36 @@ describe("capture verification against the trusted order", () => {
     expect(result).toEqual({ ok: true, captureId: "cap-2" });
   });
 
+  it("rejects a capture whose individual status conflicts with the order status", () => {
+    for (const captureStatus of ["PENDING", "DENIED", "DECLINED"]) {
+      expect(
+        verifyCaptureAgainstOrder(
+          {
+            id: ORDER_ID,
+            status: "COMPLETED",
+            capture: { id: "cap-conflict", status: captureStatus, amount: amountOf(143481) },
+          },
+          ORDER_ID,
+          143481,
+          "USD",
+        ),
+      ).toEqual({ ok: false, reason: "capture_status_mismatch" });
+    }
+
+    expect(
+      verifyCaptureAgainstOrder(
+        {
+          id: ORDER_ID,
+          status: "PENDING",
+          capture: { id: "cap-conflict", status: "COMPLETED", amount: amountOf(143481) },
+        },
+        ORDER_ID,
+        143481,
+        "USD",
+      ),
+    ).toEqual({ ok: false, reason: "capture_status_mismatch" });
+  });
+
   it("rejects an amount mismatch and reports the provider's actual amount", () => {
     const result = verifyCaptureAgainstOrder(
       { id: ORDER_ID, status: "COMPLETED", capture: { id: "cap-3", status: "COMPLETED", amount: amountOf(100) } },

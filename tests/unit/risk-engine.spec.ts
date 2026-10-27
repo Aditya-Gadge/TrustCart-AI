@@ -249,9 +249,10 @@ describe("risk engine — determinism, evidence, and isolation", () => {
 
   it("formats minor units deterministically for evidence", () => {
     expect(formatMinorForEvidence(80_000, "USD")).toBe("$800.00 USD");
-    expect(formatMinorForEvidence(1_234_567, "EUR")).toBe("$12,345.67 EUR");
-    expect(formatMinorForEvidence(5, "GBP")).toBe("$0.05 GBP");
+    expect(formatMinorForEvidence(1_234_567, "EUR")).toBe("€12,345.67 EUR");
+    expect(formatMinorForEvidence(5, "GBP")).toBe("£0.05 GBP");
     expect(formatMinorForEvidence(-250, "USD")).toBe("-$2.50 USD");
+    expect(formatMinorForEvidence(100, "JPY")).toBe("1.00 JPY");
   });
 
   it("never reads the evaluation-only fraud-label table (source isolation guard)", () => {

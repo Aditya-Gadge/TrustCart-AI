@@ -1,203 +1,280 @@
 # TrustCart AI
 
-Explainable merchant order risk analysis, investigations, and PayPal Sandbox
-payment intelligence — built for the PayPal AI Hackathon 2026.
+**Explainable merchant order investigations and PayPal Sandbox payment
+verification.** TrustCart AI is a hackathon demo for merchants and risk
+operations teams who need to review suspicious orders with evidence they can
+inspect, rather than opaque scores or automated rejection decisions.
 
-**Current status: PayPal Sandbox payment workflow complete (Phase 5 of the
-task plan).** The merchant dashboard renders over a **real PostgreSQL
-database** of synthetic orders (Prisma ORM 7) with server-side pagination,
-validated search/filter parameters, and an honest demo-dataset fallback when
-the database is not configured or unreachable. Orders are scored by the
-**deterministic, versioned risk engine** (`demo-heuristics-v1`,
-`src/lib/risk/`): every displayed reason ships with the exact evidence behind
-it, and every review decision (approve / hold / reset-to-pending) requires a
-confirmed reason, is validated against a server-side transition matrix with
-optimistic concurrency, and writes a Review + fresh engine snapshot + audit
-event in one transaction. The **AI copilot** (`/copilot`, Gemini via the
-server-only `@google/genai` SDK, default model `gemini-3.8-flash`) answers
-through fixed read-only tools over the database, cites only evidence it
-actually retrieved, and degrades to live stored data when no
-`GEMINI_API_KEY` is configured, quota is exhausted, or the provider is
-unreachable. **APPROVED orders can be paid through PayPal Sandbox** (Orders
-API v2, server-side capture with full verification, idempotent retries,
-optional verified webhooks — see the PayPal section below); the payment
-amount is always computed server-side and `VERIFIED` is written only after
-server confirmation. Nothing here connects to live payment services (the
-PayPal config parser refuses any non-Sandbox host) and no real credentials
-exist in this repo.
+> **Important:** TrustCart AI uses synthetic demo heuristics. It is not a
+> validated fraud-detection system, does not predict fraud, and must not be
+> used to make production payment, customer, or compliance decisions. The
+> repository also has no merchant authentication yet; do not expose a live
+> deployment or real customer data publicly.
 
-## Prerequisites
+## The problem and solution
 
-- Node.js 24+ and npm 11+
-- Docker Desktop (for the local PostgreSQL container) — optional: without it
-  the app still boots and the orders page shows clearly-labelled demo data.
+Merchants reviewing orders need to understand why an order was flagged, make
+and document a human decision, and verify that a payment was actually
+captured. TrustCart brings these steps together:
 
-## Getting started
+- A deterministic, versioned risk score with per-rule evidence and
+  explanations.
+- A searchable order queue and investigation history.
+- Human approve/hold decisions with server-side transition checks,
+  concurrency protection, and audit events.
+- A read-only AI copilot that answers from bounded, whitelisted queries over
+  stored order data and verifies its citations.
+- A PayPal Sandbox checkout where the server computes the amount and verifies
+  the provider's capture before showing a payment as verified.
 
-```sh
-npm install
-docker compose up -d          # local PostgreSQL 16 on host port 54329
-npm run db:generate           # generate the Prisma client into src/generated
-npm run db:migrate            # apply migrations (creates prisma/migrations)
-npm run db:seed -- --count=800  # 500–2,000 deterministic synthetic orders
+## Architecture and data flow
+
+```text
+Next.js App Router UI
+  ├─ validated order, review, stats, copilot, and payment routes
+  ├─ risk engine and AI/payment services (server only)
+  └─ Prisma data-access layer
+       └─ PostgreSQL (synthetic orders, assessments, reviews, payments, audit)
+
+Copilot: browser question → Zod validation → bounded read-only tools
+         → Gemini → validated answer + citations checked against retrieved data
+PayPal:  browser approval → server creates/captures order → PayPal Sandbox
+         → server verifies order/capture status, amount, and currency → DB
+```
+
+The AI cannot issue SQL or write to the database. It cannot change a risk
+score, review decision, or payment state. The browser never supplies trusted
+payment amounts or status. No card numbers or CVV data are stored.
+
+## Technology
+
+- Next.js 16 App Router, React 19, TypeScript (strict), Tailwind CSS 4
+- PostgreSQL 16, Prisma ORM 7, `@prisma/adapter-pg`
+- Zod request and model-output validation
+- Google Gemini API (`@google/genai`) for the optional copilot
+- PayPal Orders API v2 and `@paypal/react-paypal-js`, Sandbox only
+- Vitest unit/integration tests and Playwright browser tests
+
+## Local setup
+
+Requirements: Node.js 24.x (see [`.nvmrc`](./.nvmrc)), npm 11.x, and Docker
+Desktop (or a PostgreSQL database). The lockfile is committed; use `npm ci`
+for a reproducible install. On Windows, stop local Next.js servers before
+running `npm ci`; an active server can lock Next.js's native SWC binary.
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env and set DATABASE_URL to a local PostgreSQL connection.
+npm ci
+docker compose up -d
+npm run db:generate
+npm run db:migrate
+npm run db:seed
 npm run dev
 ```
 
-Open http://localhost:3000 — the Overview page serves live KPIs and a 14-day
-trend from `GET /api/stats` (labelled demo fallback without a database); the
-**Orders** page serves live, paginated database rows with search, risk-band
-and status filters, and sorting; every order opens an **investigation page**
-(`/orders/<id>`) with the full risk breakdown and evidence, review actions
-(confirm dialog + required reason), review history, and the audit timeline.
-The seed refuses to overwrite an existing dataset unless `--replace` is passed
-(destructive action, local dev database only).
+Open `http://localhost:3000`. If the database is not configured, some list
+and dashboard surfaces show clearly labelled synthetic fallback data; review
+history and payment actions require PostgreSQL.
 
-## PayPal Sandbox payments
+### Database migrations and demo data
 
-APPROVED orders grow a **Collect payment via PayPal Sandbox** panel on their
-investigation page. Money facts are server-side only: the buttons ask
-`POST /api/orders/:id/payments` to create the PayPal order (amount/currency
-computed from the database), relay only the PayPal order reference after
-approval, and `POST /api/orders/:id/payments/capture` captures and verifies
-the result server-side (provider order id, capture status, amount, currency,
-and association with the app order) before `VERIFIED` is persisted. Capture
-is idempotent — retries and double submissions never duplicate records — and
-cancellation, declines, mismatches, and provider timeouts have explicit
-states and messages. Optional webhooks (`PAYPAL_WEBHOOK_ID`) are
-signature-verified before any state change.
+- `npm run db:status` — inspect applied/pending migrations.
+- `npm run db:migrate` — development-only `prisma migrate dev`.
+- `npm run db:deploy` — apply committed migrations with `prisma migrate deploy`
+  in a deployment/release operation. Back up important data first; apply
+  migrations to a separate Preview database, not Production.
+- `npm run db:seed` — add 800 deterministic synthetic orders to an empty
+  database. Use `npm run db:seed -- --count=1000 --seed=20261027` to choose a
+  repeatable count and seed.
 
-**Enabling a real Sandbox checkout (manual QA — not exercised in this repo,
-no credentials exist here):**
-
-1. Create a Sandbox app at <https://developer.paypal.com/dashboard/applications>
-   (Business account comes with the developer sandbox).
-2. Put the Sandbox **client id** and **secret** in `.env`
-   (`PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`). Only the Sandbox host is
-   accepted; a live host is refused by validation.
-3. Optional: create a webhook in the developer dashboard pointing at your
-   local tunnel (e.g. `https://<tunnel>/api/payments/webhooks/paypal`) for
-   `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`,
-   `PAYMENT.CAPTURE.DENIED`, and set `PAYPAL_WEBHOOK_ID`.
-4. `npm run dev`, open an **APPROVED** order's investigation page, pay with a
-   Sandbox buyer account, and confirm the payment shows `VERIFIED` with a
-   capture id in the payment history and audit timeline.
-
-## Scripts
-
-| Script | Purpose |
-|---|---|
-| `npm run dev` | Development server |
-| `npm run build` | Production build |
-| `npm run start` | Serve the production build |
-| `npm run lint` | ESLint (flat config) |
-| `npm run typecheck` | TypeScript `--noEmit` strict check |
-| `npm run test` | Vitest (unit + live-database integration; integration skips without `DATABASE_URL`) |
-| `npm run db:generate` | Generate the Prisma client (`src/generated/prisma`) |
-| `npm run db:migrate` | Apply migrations in development (`prisma migrate dev`) |
-| `npm run db:deploy` | Apply migrations without prompts (`prisma migrate deploy`) |
-| `npm run db:seed -- --count=N` | Seed 500–2,000 synthetic orders (add `--replace` to delete existing rows first) |
-
-## Project structure
-
-```
-src/app/            App Router pages (/, /orders, /orders/[id], /investigations, /copilot, /settings) + API routes
-src/app/api/orders/ GET /api/orders — validated, paginated order search (400/503 semantics)
-src/app/api/orders/[id]/review/  POST review decision (Zod body, transition matrix, 409/422 semantics)
-src/app/api/orders/[id]/payments/  POST create PayPal order + .../capture — server-side capture & verification
-src/app/api/payments/webhooks/paypal/  POST PayPal webhooks (signature-verified, idempotent)
-src/lib/payments/   Server-only PayPal Sandbox integration, payment flow, money helpers
-src/components/payments/  PayPal Sandbox checkout buttons (client id only)
-src/app/api/stats/  GET /api/stats — dashboard aggregates from stored engine snapshots
-src/app/api/copilot/chat/  POST copilot chat — rate limit, Zod body, NDJSON event stream
-src/lib/ai/         Server-only Gemini integration, read-only copilot tools, orchestrator, Zod contracts
-src/components/copilot/  Copilot chat UI (streaming status, retry, stored-data fallback)
-src/lib/risk/       Deterministic risk engine (pure functions) + versioned rules catalogue
-src/lib/review/     Review transition matrix + labels (shared server/client)
-src/components/ui/  Reusable primitives (buttons, badges, tables, dialogs, states)
-src/components/shell/  Dashboard shell (collapsible sidebar, header, search, profile)
-src/components/orders/ Order explorer + risk breakdown + review actions
-src/components/dashboard/  DB-backed overview dashboard (stats + labelled fallback)
-src/components/investigations/  Review queue (held + high-risk pending)
-src/components/demo/   Demo-specific interactive compositions (fallback only)
-src/db/             Prisma client singleton + data access (orders, reviews, investigations, stats)
-src/lib/validation/ Shared Zod schemas (order query parameters, review action payload)
-src/lib/env.ts      Environment validation (DATABASE_URL)
-src/lib/demo/       Phase 1 demo dataset (fallback only, clearly labelled)
-src/seed/           Deterministic synthetic order generator (pure functions, real engine)
-prisma/             schema.prisma + migrations + guarded seed script
-tests/              Vitest unit suites + live-database integration suite
-docs/               Architecture + phase plan
-```
-
-## Data & demo data boundary
-
-- The **Orders** page and the investigation pages read from PostgreSQL via
-  validated API routes / server components. If the database is unreachable the
-  APIs return `503 database_unreachable` and the UI shows an explicit error
-  state with retry; if no `DATABASE_URL` is configured at all
-  (`503 database_unconfigured`), the dashboard and queue fall back to the
-  Phase 1 demo dataset behind a visible **Demo fallback** banner. The app
-  never presents static demo rows as live query results.
-- The Settings page remains a Phase 1 synthetic placeholder (clearly labelled
-  in the UI).
-- The **AI copilot** is explicitly labelled per answer: `STORED_DATA` answers
-  are grounded in rows the read-only tools fetched from the database during
-  that request, and every citation (order id + risk reason codes) is verified
-  server-side — hallucinated order references are dropped and ungrounded
-  answers are downgraded to clearly-labelled explanatory AI text. It has no
-  write path (no write tool exists), cannot run SQL or shell commands, and
-  shows live stored high-risk orders instead of AI text when Gemini is
-  unconfigured, out of quota, or unreachable. The in-memory rate limiter
-  (10 questions/min/IP) works within one server instance only. **No live
-  Gemini call has been verified yet** — no API key exists in this repo;
-  model behaviour is covered by mocked-transport tests and must be
-  re-verified manually once a key is configured.
-- Risk scores are **demo heuristics, not validated fraud predictions** — every
-  UI surface that shows a score says so. The known synthetic fraud labels
-  (`EvalLabel`) are never read by scoring code (enforced by a source-scan
-  test).
-- Review decisions are consequential: confirmation dialog + written reason
-  (re-validated server-side), server-authoritative transition matrix, and
-  optimistic concurrency (`expectedUpdatedAt` → 409 instead of a silent
-  overwrite). The reviewer identity is the server-fixed demo actor
-  `demo-merchant`; real authentication is out of hackathon scope (decision
-  D-002).
-- The seed writes **synthetic data only** (`@demo.example` addresses, invented
-  names) and **never creates Payment rows** — payment records can only come
-  from the server-side PayPal Sandbox flow (`src/lib/payments/`), and
-  `VERIFIED` is written only after server-side capture verification.
-- `EvalLabel` is evaluation-only metadata (the known synthetic class of each
-  seeded order). Risk-scoring code must never read it.
+The seed **refuses to write when any orders already exist**. This prevents
+accidentally mixing demo fixtures into a populated database. `--replace` is
+for an explicitly disposable local demo database only: it deletes all orders
+and dependent data, and the script rejects it when `NODE_ENV=production`.
+Never point seed or `--replace` at a database containing real records.
 
 ## Environment variables
 
-`.env.example` lists the variables used so far (PostgreSQL `DATABASE_URL`;
-`GEMINI_API_KEY` / `GEMINI_MODEL` for the copilot since Phase 4;
-`PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` / `PAYPAL_WEBHOOK_ID` for the
-Sandbox payment flow since Phase 5) with **placeholders
-only**. Copy it to `.env` for local development — `.env` is gitignored.
+Set secrets in the hosting provider's server-side environment configuration;
+do not commit `.env`, copy secrets into `NEXT_PUBLIC_*`, or expose them in
+screenshots or logs. `.env.example` contains only local-development defaults
+and provider placeholders, not production credentials.
 
-- Keep every real credential out of git, logs, screenshots, and client code.
-- `GEMINI_API_KEY` and the PayPal **secret** are read server-side only (the
-  copilot and payment modules are marked `server-only`); without them the
-  app boots and the respective features degrade to labelled states. The
-  PayPal **client id** is public by design and is the only credential the
-  browser ever sees.
-- `.gitignore` excludes `.env*` but intentionally includes `.env.example`.
-- The database URL is validated at startup (`src/lib/env.ts`); the app boots
-  without one and degrades to the labelled demo fallback.
+| Variable | Required? | Purpose |
+|---|---|---|
+| `DATABASE_URL` | For live DB-backed features | PostgreSQL URL. For serverless hosting, use the provider's pooled connection string and keep a separate database/branch for Preview. |
+| `GEMINI_API_KEY` | Optional | Server-only Google AI Studio API key. Without it, Copilot returns an unconfigured state and the UI offers stored-data fallback. |
+| `GEMINI_MODEL` | Optional | Gemini model ID available to your project. Defaults to `gemini-3.8-flash`; confirm current model availability and quota in AI Studio before relying on it. |
+| `PAYPAL_CLIENT_ID` | Optional | PayPal Sandbox app client ID. This is passed to the PayPal browser SDK and is not a secret. |
+| `PAYPAL_CLIENT_SECRET` | Optional | PayPal Sandbox app secret; server-side only. |
+| `PAYPAL_BASE_URL` | Optional | Must be `https://api-m.sandbox.paypal.com`; the app rejects non-Sandbox hosts. |
+| `PAYPAL_WEBHOOK_ID` | Optional | ID for the webhook configured in the PayPal developer dashboard. Leave unset if webhooks are not configured. |
 
-All monetary values use **integer minor units** with an explicit currency,
-matching the discipline later applied by the risk engine and PayPal flows.
+Do not configure the PayPal production/live API host or production credentials:
+this project intentionally supports Sandbox only.
 
-## Accessibility & UX commitments
+## Deployment preparation
 
-- Keyboard-navigable sidebar, dialogs (native `<dialog>`), and menus; skip-to-content link; visible focus states.
-- Responsive: desktop sidebar collapses to an icon rail (24px transition, content reflows without distortion); tablet/mobile uses a slide-over drawer.
-- Designed loading (skeletons), empty, and error states are part of the shared component system.
-- Light theme only in Phase 1 (scoped-out: dark theme).
+The project is configured for Next.js builds and Prisma client generation. A
+candidate low-cost stack is Vercel Hobby plus a PostgreSQL provider with a
+free tier (for example Neon), **subject to current plan rules, regional
+availability, and usage limits**. [Render](https://paypalaihackathon.devpost.com/details/render)
+is also a hackathon sponsor offering a free web-service tier and free
+PostgreSQL, with a sponsor prize category — verify its current free-tier
+limits and cold-start behaviour before choosing. Vercel's official Hobby plan
+is restricted to non-commercial personal use; confirm that your hackathon
+submission and account use are eligible before selecting it. See the
+[Hobby plan limits](https://vercel.com/docs/plans/hobby) and
+[pricing](https://vercel.com/pricing). No Vercel/Render account, database,
+project, or deployment is configured by this repository, and there is no
+deployment URL to report.
 
-## Roadmap
+1. Create a dedicated PostgreSQL database for Production and a separate one
+   for Preview. For a serverless deployment, use the database provider's
+   pooled URL and TLS connection settings; place the app and DB in nearby
+   regions. Free-tier suspension, connection, storage, and compute limits can
+   affect cold starts and availability.
+2. Connect the repository to Vercel and select Next.js. The project build
+   command is `npm run build`; install uses the committed `package-lock.json`.
+3. Configure `DATABASE_URL` separately for Production and Preview. Add
+   `GEMINI_API_KEY`, `PAYPAL_CLIENT_ID`, and `PAYPAL_CLIENT_SECRET` only when
+   enabling those features; set `PAYPAL_WEBHOOK_ID` only after webhook setup.
+   Never use a Production URL in Preview.
+4. Apply migrations deliberately with `DATABASE_URL=<production-url> npm run
+   db:deploy` from a trusted release environment. Do **not** run migrations
+   automatically in the build step, and do not seed Production.
+5. Test the deployment using synthetic-only data, then validate the exact
+   public origin, database queries, Gemini response/fallback, and PayPal
+   Sandbox checkout. `GET /api/health` reports `{ status, database }` and is
+   the intended health-check path for the hosting provider. Do not expose a
+   deployment publicly until server-side merchant authentication and trusted
+   rate-limit identity are implemented.
 
-See `docs/architecture.md` and `docs/implementation-phases.md` for the phased
-plan, acceptance criteria, and open decisions.
+Vercel's free allowance is subject to account and product quotas and may pause
+usage when limits are reached. Neon Free currently lists per-project compute,
+storage, and data-transfer limits; verify current [Neon plan details](https://neon.com/pricing)
+before deployment. For Prisma's serverless recommendations, see the [Prisma
+ORM 7 Vercel deployment guide](https://www.prisma.io/docs/orm/v7/prisma-client/deployment/serverless/deploy-to-vercel)
+and [Neon's pooled connection guidance](https://neon.com/docs/connect/connect-from-any-app).
+
+## AI design, quotas, and fallback
+
+Gemini receives a bounded question and conversation history. It can select
+only fixed, read-only tools; inputs and final output are schema-validated,
+and order/reason citations are checked against data retrieved during that
+request. Stored notes and customer names are treated as untrusted text.
+
+Gemini quotas vary by project, model, and usage tier; RPM, token, and daily
+quotas may change, and free-tier access is limited. Check [current rate
+limits](https://ai.google.dev/gemini-api/docs/rate-limits), [pricing](https://ai.google.dev/gemini-api/docs/pricing),
+and the active project limits in AI Studio. On missing credentials, quota
+exhaustion, or provider errors, the app provides a controlled error or
+stored-data fallback instead of claiming an AI answer was produced.
+
+The risk rules are deterministic heuristics created for synthetic data. They
+are not trained or calibrated against real payment outcomes, and no accuracy
+or fraud-prevention claim is made. Merchants, not AI, make decisions.
+
+## PayPal Sandbox test procedure
+
+This checkout uses PayPal Sandbox only. The repository test clearly
+distinguishes browser-mocked checkout from a real Sandbox buyer run.
+
+1. Create a **Sandbox** REST app and Sandbox buyer in the
+   [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/applications/sandbox).
+2. Configure `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` in the
+   deployment's server environment. The client ID is public by design; keep
+   the secret server-side.
+3. Open an **APPROVED** synthetic order on the deployed HTTPS origin and
+   complete checkout using the Sandbox buyer. Review the order's payment
+   history and audit timeline; it should show `VERIFIED` only after server
+   capture verification. A browser approval alone is not proof of payment.
+4. Optional webhooks: create a Sandbox webhook using the exact deployed
+   HTTPS URL `/api/payments/webhooks/paypal`, subscribe to the event types
+   used by the app, and configure its ID as `PAYPAL_WEBHOOK_ID`. The webhook
+   is signature-checked but is not allowed to verify a payment.
+5. Do not claim a real Sandbox transaction unless the checkout completed
+   against PayPal without mocks. See the official [REST app credential
+   instructions](https://www.paypal.com/us/cshelp/article/how-do-i-create-paypal-rest-api-credentials-ts1949).
+
+## Hackathon submission checks
+
+Verified against the live listing and Devpost's public API on **October 27,
+2026**: the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/) is
+**open**, with a submission period of **October 1 – November 12, 2026**
+(Devpost's API reported "16 days left" on October 27, 2026, consistent with a
+November 12, 2026 deadline). The exact deadline **time and timezone** could
+not be independently verified because the rules page is bot-protected; an
+earlier review of the official rules recorded **12:00 pm Pacific Time** on
+November 12, 2026. Confirm the time on the live
+[rules page](https://paypalaihackathon.devpost.com/rules) before submitting.
+
+The current rules require a project that makes the PayPal Developer Platform
+(Sandbox) central and also meaningfully incorporates AI; a project text
+description; a functional demo — either a hosted demo URL **or** clear,
+complete repository setup/run instructions (this README provides the latter);
+identification of the AI tools used; a **public code repository with an
+open-source license file visible at the top of the repository**; and a demo
+video under three minutes, uploaded publicly to YouTube, showing the project
+functioning on its target device. Projects may be new or existing, provided
+meaningful progress happened during the submission period. Eligibility
+includes age-of-majority and location requirements; read the full official
+rules for exclusions and conditions. The verified judging categories are
+technological implementation, design, potential impact, innovation/idea, and
+presentation.
+
+**Submission status:** the [MIT license](./LICENSE) now exists at the
+repository root, satisfying the license-file requirement. Still outstanding
+(owner actions, not yet performed or verified): pushing the repository to a
+public GitHub/GitLab/Bitbucket URL; recording and uploading the public
+YouTube demo video (timed script:
+[`docs/demo-script.md`](./docs/demo-script.md)); optionally creating a hosted
+demo deployment. No deployment URL is claimed and no video is claimed to
+exist.
+
+## Demo walkthrough
+
+See [`docs/demo-script.md`](./docs/demo-script.md) for a timed,
+under-three-minute walkthrough from dashboard through verified Sandbox
+payment.
+
+## Checks and tests
+
+```powershell
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npm run test:e2e
+```
+
+Unit and integration tests use mocked provider calls; integration tests
+require PostgreSQL. Playwright includes explicitly labelled mocked checkout
+tests and a real Sandbox test that requires buyer credentials. The
+integration and Playwright suites use the same local database and write test
+records, so run the commands sequentially rather than concurrently. A skipped
+real provider test is not a successful provider test. Current results and
+unresolved security/deployment blockers are tracked in
+[`PROJECT_STATUS.md`](./PROJECT_STATUS.md).
+
+## Known limitations
+
+- No merchant login/session or multi-tenant authorization exists; do not
+  expose order details or state-changing routes publicly.
+- Rate limiting is in-memory and uses request headers; it is not distributed
+  or safe against spoofing unless a trusted proxy sanitizes client identity.
+- Gemini quota and provider availability are external; fallback may be shown.
+- PayPal live checkout is deliberately unsupported. A real Sandbox buyer
+  checkout has not been verified in this environment.
+- Free hosting/database plans have changing quotas, dormancy rules, and
+  eligibility restrictions.
+
+## License
+
+Released under the [MIT License](./LICENSE). Basis for the choice: all source
+files, tests, and documentation in this repository were authored for this
+project; the only third-party-derived asset is the default `favicon.ico`
+generated by `create-next-app` (Next.js and its templates are MIT licensed).
+Dependencies are installed from their own packages at build time and keep
+their own licenses; nothing else is redistributed.

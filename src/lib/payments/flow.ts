@@ -268,10 +268,9 @@ export async function createPaymentForOrder(
 
 /**
  * Verify the capture response against the trusted application order:
- * provider order id association, capture status, capture amount, currency.
- * COMPLETED (money confirmed) and PENDING (capture initiated, provider-side
- * pending) are both acceptable server outcomes; the flow maps them to
- * VERIFIED / CAPTURED. Anything else is a failure reason.
+ * provider order id association, matching order/capture statuses, capture
+ * amount, and currency. COMPLETED (money confirmed) and PENDING (capture
+ * initiated, provider-side pending) map to VERIFIED / CAPTURED respectively.
  */
 export function verifyCaptureAgainstOrder(
   captureResult: PayPalCaptureResult,
@@ -290,6 +289,9 @@ export function verifyCaptureAgainstOrder(
     return { ok: false, reason: `capture_status_${captureResult.status.toLowerCase()}` };
   }
   if (capture) {
+    if (capture.status !== captureResult.status) {
+      return { ok: false, reason: "capture_status_mismatch" };
+    }
     if (capture.amount === null) return { ok: false, reason: "capture_amount_missing" };
     const actualMinor = decimalStringToMinorUnits(capture.amount.value, capture.amount.currency_code);
     if (capture.amount.currency_code !== expectedCurrency || actualMinor !== expectedAmountMinor) {

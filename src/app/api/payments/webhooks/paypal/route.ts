@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getPrisma } from "@/db/client";
 import { getPayPalConfig, createPayPalTransport } from "@/lib/payments/paypal";
 import { handlePaypalWebhook, WEBHOOK_MAX_BODY_BYTES } from "@/lib/payments/flow";
+import { readLimitedBody } from "@/lib/payments/read-limited-body";
 
 /**
  * POST /api/payments/webhooks/paypal — PayPal Sandbox webhooks (Phase 5).
@@ -29,13 +30,19 @@ export async function POST(request: NextRequest) {
   }
 
   // Defensive size cap before reading/parsing (Phase 6).
-  const contentLength = Number(request.headers.get("content-length") ?? "0");
-  if (Number.isFinite(contentLength) && contentLength > WEBHOOK_MAX_BODY_BYTES) {
+  const contentLengthHeader = request.headers.get("content-length");
+  const contentLength = contentLengthHeader === null ? null : Number(contentLengthHeader);
+  if (contentLength !== null && Number.isFinite(contentLength) && contentLength > WEBHOOK_MAX_BODY_BYTES) {
     return NextResponse.json({ error: "malformed_payload" }, { status: 400 });
   }
 
-  const rawBody = await request.text();
-  if (rawBody.length > WEBHOOK_MAX_BODY_BYTES) {
+  let rawBody: string | null;
+  try {
+    rawBody = await readLimitedBody(request.body, WEBHOOK_MAX_BODY_BYTES);
+  } catch {
+    return NextResponse.json({ error: "malformed_payload" }, { status: 400 });
+  }
+  if (rawBody === null) {
     return NextResponse.json({ error: "malformed_payload" }, { status: 400 });
   }
   const outcome = await handlePaypalWebhook(

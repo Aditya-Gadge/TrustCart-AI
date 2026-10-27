@@ -49,6 +49,9 @@ async function main() {
   if (count < MIN_COUNT || count > MAX_COUNT) {
     throw new Error(`--count must be between ${MIN_COUNT} and ${MAX_COUNT} (got ${count})`);
   }
+  if (replace && process.env.NODE_ENV === "production") {
+    throw new Error("--replace is disabled in production to protect existing database records");
+  }
 
   const prisma = getPrisma();
   if (!prisma) {

@@ -1,8 +1,11 @@
 # TrustCart AI — Project Status
 
-Last verified: **2026-10-27** (Phase 6 QA / security review / E2E session).
-Phase 6 (QA, security review, integration hardening, final E2E) is **complete** —
-see the Phase 6 defect report and verification tables below.
+Last verified: **2026-10-27** (Phase 7 deployment & submission preparation).
+Phase 6 automated QA and integration hardening checks pass. Phase 7
+deployment and submission preparation is **complete**; the application itself
+is **not deployed** and no deployment URL exists.
+**Public deployment is blocked** until merchant authorization is implemented
+and rate limiting trusts only a verified proxy identity; see findings below.
 
 ## Phase status
 
@@ -13,7 +16,8 @@ see the Phase 6 defect report and verification tables below.
 | 3 | Investigation view, review workflow (transitions, optimistic concurrency), audit timeline | ✅ Done |
 | 4 | Gemini AI merchant copilot (read-only tools, grounded answers, DB fallback) | ✅ Done — verified below |
 | 5 | PayPal Sandbox payments (server-side create/capture/verify, idempotent, webhooks) | ✅ Done — verified below |
-| 6 | QA, security review, integration hardening, final E2E | ✅ Done — verified below |
+| 6 | QA, security review, integration hardening, final E2E | ⚠️ Checks pass; public deployment blocked by security findings below |
+| 7 | Reproducible deployment and hackathon submission preparation | ✅ Done — verified below; owner credentials, publish, and video steps outstanding |
 
 ## ⚠️ Required: rotate provider credentials
 
@@ -57,8 +61,9 @@ was verified: every value in `.env.example` is now a non-secret placeholder.
 |---|---|---|
 | `npm run lint` | 0 | clean |
 | `npm run typecheck` | 0 | clean |
-| `npm run test` (Vitest run) | 0 | **165/165 tests pass, 19/19 files** (two consecutive clean runs) |
+| `npm run test` (Vitest run) | 0 | **170/170 tests pass, 21/21 files** |
 | `npm run build` (`next build`) | 0 | all routes compiled, incl. 3 payment routes |
+| `npm start` + `GET /api/health` | 200 | `{"status":"ok","database":"connected"}` (live smoke, Phase 7) |
 | `npm run test:e2e` (Playwright) | 0 | **13 passed, 1 skipped** — the REAL Sandbox test skips by design without buyer credentials |
 | `npm start` + `curl` live smoke | — | see "Live verification" below |
 
@@ -95,9 +100,9 @@ verification, idempotency, audit honesty).
 
 ## Phase 6 defect report (prioritized)
 
-Found by the Phase 6 QA/security review and the Playwright E2E run. Every fix
-has a regression test that was confirmed failing before the fix and passing
-after it.
+Found by the Phase 6 QA/security review and Playwright E2E run. Historical
+fixes are recorded below; current follow-up findings, their disposition, and
+the latest verification results follow the inventory.
 
 ### P1 — security
 
@@ -173,13 +178,40 @@ after it.
    `listOrders` returns an empty page instead of an error when the requested
    page exceeds `pageCount`.
 
-## Test inventory — all PASS (165/165)
+### Current Phase 6 follow-up findings
+
+1. **HIGH — Merchant authentication is absent.** The order API exposes
+   synthetic customer/order data, and review/payment mutation endpoints accept
+   unauthenticated callers. A fixed demo reviewer label is not authorization.
+   This remains a release blocker: adding an identity/session system would be
+   a major scope change, so no fake identity or ineffective header check was
+   introduced.
+2. **MEDIUM — Capture status disagreement could be marked VERIFIED.** The
+   order-level PayPal status was checked, but not the individual capture
+   status. Fixed by requiring both statuses to agree before accepting amount
+   and currency; regression tests cover conflicting PENDING, DENIED, and
+   COMPLETED values.
+3. **MEDIUM — Webhook body size was checked only after `request.text()` had
+   buffered it.** Fixed by reading the request stream with a byte limit and
+   cancelling an oversized stream; a unit regression verifies cancellation
+   without a trusted `Content-Length`.
+4. **MEDIUM — Rate-limit identity trusts caller-controlled
+   `x-forwarded-for`.** The existing in-memory limiter can be evaded by
+   rotating this header unless a trusted proxy overwrites and validates it.
+   This infrastructure-dependent limitation remains documented in
+   `src/lib/ratelimit.ts`; public deployment must configure a verified client
+   identity or equivalent edge rate limiting.
+5. **LOW — EUR/GBP risk evidence used the USD `$` symbol.** Fixed with
+   currency-specific symbols and regression assertions, including a safe
+   ISO-code fallback for unsupported currencies.
+
+## Test inventory — all PASS (170/170)
 
 All provider behaviour in automated tests is **mocked**; the database in
 integration tests is the **real PostgreSQL** instance. No automated test
 contacts Gemini or PayPal.
 
-### Unit (103)
+### Unit (107)
 
 `tests/unit/risk-engine.spec.ts` (25) — PASS
 - maps documented band edges exactly
@@ -270,7 +302,7 @@ contacts Gemini or PayPal.
 - refuses the LIVE PayPal host outright
 - keeps the optional webhook id and rejects short credentials
 
-`tests/unit/payments-money.spec.ts` (11) — PASS
+`tests/unit/payments-money.spec.ts` (12) — PASS
 - converts minor units to PayPal decimal strings without float math
 - converts PayPal decimal strings back to integer minor units
 - rejects malformed values and unmapped currencies loudly
@@ -278,6 +310,7 @@ contacts Gemini or PayPal.
 - fails loudly instead of silently losing precision beyond the safe integer range
 - accepts a COMPLETED capture that matches order id, amount, and currency
 - accepts a PENDING capture (mapped to CAPTURED, not VERIFIED)
+- rejects conflicting order-level and individual capture statuses
 - rejects an amount mismatch and reports the provider's actual amount
 - rejects a currency mismatch even for the same numeric amount
 - rejects a capture response for a DIFFERENT PayPal order id
@@ -303,7 +336,14 @@ contacts Gemini or PayPal.
 - maps every DEMO_ORDERS riskBand with the engine's levelForScore
 - never claims shipped features are still scheduled
 
-### Integration — real PostgreSQL, mocked providers (62)
+`tests/unit/read-limited-body.spec.ts` (2) — PASS
+- decodes a request body within the byte limit
+- cancels an oversized stream without reading further chunks
+
+`tests/unit/seed-safety.spec.ts` (1) — PASS (Phase 7 regression suite)
+- rejects destructive replacement in production before connecting to a database
+
+### Integration — real PostgreSQL, mocked providers (63)
 
 `tests/integration/copilot-tools.spec.ts` (7) — PASS
 - rejects unknown tools before any database access
@@ -345,7 +385,7 @@ contacts Gemini or PayPal.
 - returns 404 for unknown orders
 - serves dashboard aggregates from stored engine snapshots
 
-`tests/integration/payments-flow.spec.ts` (22) — PASS (mocked PayPal transport, real DB)
+`tests/integration/payments-flow.spec.ts` (23) — PASS (mocked PayPal transport, real DB)
 - creates a payment from trusted server-side order data and records an audit event
 - is idempotent while the payment is active: the same PayPal order returns, no new row
 - rejects creation for orders that are not APPROVED and for unknown orders
@@ -355,6 +395,7 @@ contacts Gemini or PayPal.
 - returns the persisted state for duplicate capture requests (no new records)
 - rejects a capture whose PayPal order belongs to a DIFFERENT application order
 - marks the payment FAILED when the captured amount mismatches the order
+- never verifies a COMPLETED order with a non-COMPLETED capture record
 - records DECLINED captures as FAILED (never VERIFIED)
 - leaves the row untouched on a capture timeout, and an idempotent retry succeeds
 - maps a PENDING provider capture to CAPTURED (not VERIFIED)
@@ -418,7 +459,7 @@ side effect.
 ## Live verification — separated by class
 
 ### Local integration (real DB + mocked providers): PASS
-All 165 automated tests plus the Playwright E2E suite above. Provider
+All 170 automated tests plus the Playwright E2E suite above. Provider
 responses are simulated fixtures, clearly labelled as such in every suite
 header. No automated test contacts Gemini or PayPal (the two MOCKED checkout
 tests stub the PayPal SDK at the browser level by design).
@@ -474,8 +515,9 @@ tests stub the PayPal SDK at the browser level by design).
   computed from the trusted DB row and verified against the provider's
   capture response; forged-field test proves forged keys are stripped.
 - `VERIFIED` is written only after server-side capture verification (provider
-  order id, capture status, amount, currency, association) or a
-  signature-verified webhook; browser approval alone is never trusted.
+  order id, order/capture status agreement, amount, currency, association);
+  webhooks cannot verify a payment, and browser approval alone is never
+  trusted.
 - Secrets stay server-side (`server-only` modules); responses never contain
   credentials (verified live); the PayPal client id is public by design;
   webhooks are signature-verified before any state change; the demo stores no
@@ -501,24 +543,103 @@ tests stub the PayPal SDK at the browser level by design).
    the retry fix it will complete on the next successful create attempt.
 3. Gemini model id `gemini-3.8-flash` is pinned by default; override with
    `GEMINI_MODEL`.
-4. No git repository exists (documented Phase 0 deviation) — nothing is
-   committed anywhere.
-5. Demo authorization model: single synthetic merchant, no auth layer (D-002).
-6. **Credential rotation is required** (section at the top of this document) —
+4. **Release blocker:** demo authorization model is single synthetic merchant
+   with no auth layer (D-002). Do not expose this application publicly until a
+   real server-side merchant identity/session model protects sensitive reads
+   and mutations.
+5. **Credential rotation is required** (section at the top of this document) —
    the Phase 6 review found real-looking provider keys in `.env.example`.
-7. Playwright E2E needs the PostgreSQL instance from `.env` running and a
+6. Playwright E2E needs the PostgreSQL instance from `.env` running and a
    prior `npm run build`; the review-approve e2e writes one Review + audit
    rows into the demo database (documented above).
-8. The order explorer initializes its filters from component state only —
+7. The order explorer initializes its filters from component state only —
    URL query params are not read on load (the e2e suite drives the UI selects
    accordingly). Reading filters from the URL is a future improvement, not a
    defect.
 
+## Phase 7 — deployment preparation (2026-10-27)
+
+Completed in the working tree:
+
+- Replaced the setup guide with deployment-aware documentation covering app
+  architecture, environment variables, migrations, safe synthetic seeding,
+  Gemini limitations, Sandbox checkout, tests, and the synthetic-risk
+  disclaimer.
+- Added Prisma client generation to `npm run build` and `postinstall`, a
+  migration-status command, Node 24 selection, and a production guard against
+  `db:seed --replace`.
+- Added a timed demo script under three minutes and ignored/removed tracked
+  generated test output files.
+- Reviewed the tracked file list and the single local commit (`952281a`):
+  `.env` is not tracked; `.env.example` has local-development defaults and
+  provider placeholders, and no high-confidence credential patterns were
+  found in committed files (`git grep` of HEAD). Stale `.vitest/` and
+  `test-results/` artifacts are deleted and gitignored. A deployment URL and
+  real PayPal checkout are not verified.
+- Added the **MIT `LICENSE`** after a provenance check: all sources were
+  authored in this repository; the only third-party-derived asset is the
+  create-next-app default `favicon.ico` (Next.js is MIT licensed). Basis
+  documented in the README.
+- Added `GET /api/health` (honest liveness probe: 200 with
+  `{status, database}` — verified live against the production build) and
+  pinned `engines.node >= 24` to match `.nvmrc`.
+- Re-verified the hackathon listing via Devpost's public API on 2026-10-27:
+  **open**, submission period **October 1 – November 12, 2026**, "16 days
+  left". The exact deadline **time/timezone could not be verified** (the
+  rules page is bot-protected); the recorded 12:00 pm Pacific Time still
+  needs manual confirmation on the live rules page.
+- Committed the reviewed working tree locally with a descriptive message;
+  nothing has been pushed to any remote.
+
+Current Phase 7 verification (test suites run sequentially because integration
+and browser tests share and mutate the local PostgreSQL database):
+
+| Command | Exit code | Result |
+|---|---:|---|
+| `npm run lint` | 0 | clean |
+| `npm run typecheck` | 0 | clean |
+| `npm test` | 0 | 170 tests passed, 21 test files |
+| `npm run build` | 0 | Prisma Client generated; production build completed |
+| `npm run db:status` | 0 | Two migrations found; local PostgreSQL schema up to date (read-only check) |
+| `npm run test:e2e` | 0 | 13 passed; real Sandbox checkout skipped because provider buyer credentials are unavailable |
+| `npm ci` | -4048 | Blocked by EPERM: active Next.js servers held the Windows SWC binary. `npm install --ignore-scripts --no-audit --no-fund` restored dependencies (exit 0, cleanup warning); postinstall/build/lint/typecheck/tests and E2E then passed. |
+
+`npm run test:e2e` was initially run concurrently with the database-backed
+test suite; the order-count assertion observed different database totals.
+Running Playwright alone after the unit/integration suite completed passed.
+Run these suites sequentially.
+
+Remaining Phase 7 blockers/manual actions:
+
+1. The current [official listing](https://paypalaihackathon.devpost.com/)
+   was re-verified live via Devpost's public API on 2026-10-27 (submission
+   period October 1 – November 12, 2026, open, "16 days left"). The
+   [rules page](https://paypalaihackathon.devpost.com/rules) is bot-protected
+   (Cloudflare 403) from this environment, so the deadline **time/timezone**
+   could not be re-verified: the recorded value is November 12, 2026 at
+   12:00 pm Pacific Time (the listing labels it PST) — confirm manually
+   before submitting. Rules require a PayPal Sandbox integration central to
+   the project plus AI, a description, a functional demo or complete setup
+   instructions, a public repository with a visible open-source license, and
+   a working public YouTube demo video under three minutes. Existing projects
+   must be significantly updated after October 1 and explain those updates.
+2. The MIT license is now present (`LICENSE`) with its provenance basis in
+   the README. Still required from the owner: a public
+   GitHub/GitLab/Bitbucket repository and the recorded public YouTube video —
+   neither exists yet, and no video is claimed.
+3. Vercel Hobby, a PostgreSQL provider, production domain, Production and
+   Preview environment variables, database migrations, and PayPal Sandbox
+   credentials must be configured by the project owner. No deployment or
+   deployed-origin PayPal verification has occurred.
+4. Public deployment remains unsafe until server-side merchant
+   authentication/authorization and trusted-proxy rate-limit identity are
+   addressed. Do not use real customer data.
+
 ## How to run
 
 ```powershell
-npm install
-npm run test        # 165 tests (integration tests need the Postgres instance)
+npm ci              # Node.js 24.x; integration tests need PostgreSQL
+npm run test        # 170 unit/integration tests
 npm run build       # production build (required before test:e2e)
 npm run test:e2e    # Playwright E2E: 13 core/checkout tests + 1 REAL skip
 npm run dev         # or: npm run build; npm start

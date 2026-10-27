@@ -25,7 +25,7 @@ const hasDatabaseUrl = process.env.DATABASE_URL !== undefined && process.env.DAT
 
 let prisma: PrismaClient;
 
-const FIXTURE_NUMBERS = Array.from({ length: 16 }, (_, index) => `TC-88${String(index + 1).padStart(2, "0")}`);
+const FIXTURE_NUMBERS = Array.from({ length: 17 }, (_, index) => `TC-88${String(index + 1).padStart(2, "0")}`);
 
 type Fixture = {
   orderId: string;
@@ -295,6 +295,41 @@ describeIf("capture (server-side verification, mocked provider)", () => {
       currency: "USD",
     });
 
+    const row = await prisma.payment.findFirst({ where: { orderId: fixture.orderId } });
+    expect(row?.status).toBe("FAILED");
+    expect(row?.verifiedAt).toBeNull();
+  });
+
+  it("never verifies a COMPLETED order with a non-COMPLETED capture record", async () => {
+    const fixture = await makeFixture("TC-8817", 30_000);
+    await createPaymentForOrder(prisma, transportFor(fixture), fixture.orderId);
+
+    const inconsistent = transportFor(fixture, {
+      captureOrder: async () => ({
+        id: fixture.providerOrderId,
+        status: "COMPLETED",
+        capture: {
+          id: "CAPTURE-STILL-PENDING",
+          status: "PENDING",
+          amount: {
+            currency_code: fixture.currency,
+            value: minorUnitsToDecimalString(fixture.amountMinor, fixture.currency),
+          },
+        },
+      }),
+    });
+    const outcome = await capturePaymentForOrder(
+      prisma,
+      inconsistent,
+      fixture.orderId,
+      fixture.providerOrderId,
+    );
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: "provider_error",
+      kind: "invalid_response",
+    });
     const row = await prisma.payment.findFirst({ where: { orderId: fixture.orderId } });
     expect(row?.status).toBe("FAILED");
     expect(row?.verifiedAt).toBeNull();
